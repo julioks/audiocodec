@@ -1,0 +1,9 @@
+# Copy this file to arduino-cli.yaml if you want the helper script to use a
+# project-local Arduino CLI configuration. Keep arduino-cli.yaml untracked so
+# each machine can use its own Arduino data and sketchbook paths.
+directories:
+  data: C:\Users\YOUR_USER\AppData\Local\Arduino15
+  downloads: C:\Users\YOUR_USER\AppData\Local\Arduino15\staging
+  user: C:\Users\YOUR_USER\Documents\Arduino
+updater:
+  enable_notification: false

@@ -1,0 +1,446 @@
+#include <Arduino.h>
+#include <Adafruit_NeoPixel.h>
+#include "driver/i2s.h"
+#include <stdlib.h>
+#include <string.h>
+
+#define I2S_PORT        I2S_NUM_0
+
+#define PIN_I2S_MCLK    0    // Classic ESP32: usually GPIO0/GPIO1/GPIO3 only
+#define PIN_I2S_BCLK    26
+#define PIN_I2S_LRCK    25
+#define PIN_I2S_DIN     35   // input-only GPIO is fine for DOUT -> ESP32
+
+#define SAMPLE_RATE     96000
+#define MCLK_HZ         24576000  // 96k * 256
+
+#define LED_PIN         23   // NeoPixel data output. GPIO23 is output-capable and does not overlap the I2S pins.
+
+static constexpr uint16_t LED_DRIVER_GRID_WIDTH = 32;
+static constexpr uint16_t LED_DRIVER_GRID_HEIGHT = 16;
+static constexpr uint32_t LED_COUNT_32 = (uint32_t)LED_DRIVER_GRID_WIDTH * (uint32_t)LED_DRIVER_GRID_HEIGHT;
+static_assert(LED_COUNT_32 <= 65535UL, "Adafruit_NeoPixel uses 16-bit pixel indexes; use parallel output or another driver for larger panels.");
+static constexpr uint16_t LED_COUNT = (uint16_t)LED_COUNT_32;
+static constexpr uint8_t LED_BRIGHTNESS = 48;
+static constexpr uint32_t LED_TARGET_FRAME_US = 16667UL; // 60 FPS target when WS2812 timing allows it.
+static constexpr uint32_t LED_WS2812_US_PER_PIXEL = 30UL;
+static constexpr uint32_t LED_SHOW_MARGIN_US = 700UL;
+static constexpr uint32_t LED_RENDER_BUDGET_US = 7000UL;
+static constexpr uint32_t LED_RENDER_IDLE_MARGIN_US = 400UL;
+static constexpr bool DEBUG_AUDIO_PRINTS = false;
+static constexpr uint8_t DEFAULT_VISUALIZER_INDEX = 0;
+static constexpr uint16_t AUDIO_FRAMES_PER_BLOCK = 256;
+
+enum LED_DRIVER_LAYOUT : uint8_t {
+  LED_DRIVER_LAYOUT_COLUMN_SERPENTINE
+};
+
+static constexpr LED_DRIVER_LAYOUT LED_LAYOUT = LED_DRIVER_LAYOUT_COLUMN_SERPENTINE;
+static constexpr bool LED_FIRST_PIXEL_IS_BOTTOM_LEFT = true; // Flip this if the visualizers draw upside down.
+
+Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
+uint8_t currentLedBrightness = LED_BRIGHTNESS;
+
+#ifndef I2S_COMM_FORMAT_STAND_I2S
+  #define I2S_COMM_FORMAT_STAND_I2S I2S_COMM_FORMAT_I2S
+#endif
+
+uint16_t ledIndexXY(uint16_t x, uint16_t yFromBottom) {
+  if (x >= LED_DRIVER_GRID_WIDTH || yFromBottom >= LED_DRIVER_GRID_HEIGHT) {
+    return 0;
+  }
+
+  uint16_t stripY = LED_FIRST_PIXEL_IS_BOTTOM_LEFT
+    ? yFromBottom
+    : (LED_DRIVER_GRID_HEIGHT - 1 - yFromBottom);
+
+  switch (LED_LAYOUT) {
+    case LED_DRIVER_LAYOUT_COLUMN_SERPENTINE:
+    default:
+      if (x & 0x01) {
+        stripY = LED_DRIVER_GRID_HEIGHT - 1 - stripY;
+      }
+      return (uint16_t)x * LED_DRIVER_GRID_HEIGHT + stripY;
+  }
+}
+
+#include "audio/AudioAnalyzer.h"
+#include "visualiser/SpectrumGridVisualizer.h"
+#include "visualiser/DriftRippleVisualizer.h"
+#include "visualiser/SparkParticleVisualizer.h"
+#include "visualiser/WaveformPlasmaVisualizer.h"
+#include "visualiser/CandyPeakSpectrumVisualizer.h"
+#include "visualiser/AfterglowVisualizer.h"
+#include "visualiser/EmberVortexVisualizer.h"
+
+SpectrumGridVisualizer spectrumVisualizer;
+DriftRippleVisualizer driftRippleVisualizer;
+SparkParticleVisualizer sparkParticleVisualizer;
+WaveformPlasmaVisualizer waveformPlasmaVisualizer;
+CandyPeakSpectrumVisualizer candyPeakSpectrumVisualizer;
+AfterglowVisualizer afterglowVisualizer;
+EmberVortexVisualizer emberVortexVisualizer;
+
+AudioVisualizer* visualizers[] = {
+  &spectrumVisualizer,
+  &driftRippleVisualizer,
+  &sparkParticleVisualizer,
+  &waveformPlasmaVisualizer,
+  &candyPeakSpectrumVisualizer,
+  &afterglowVisualizer,
+  &emberVortexVisualizer
+};
+
+static constexpr uint8_t VISUALIZER_COUNT = sizeof(visualizers) / sizeof(visualizers[0]);
+uint8_t activeVisualizerIndex = 0;
+uint32_t lastLedRefreshUs = 0;
+uint32_t lastRenderDurationUs = 0;
+uint32_t lastShowDurationUs = 0;
+
+AudioAnalyzer audioAnalyzer;
+AudioAnalysisFrame sharedAudioFrame;
+portMUX_TYPE audioFrameMux = portMUX_INITIALIZER_UNLOCKED;
+TaskHandle_t audioTaskHandle = nullptr;
+
+static int32_t audioTaskSamples[AUDIO_FRAMES_PER_BLOCK * 2];
+volatile uint32_t audioReadFailures = 0;
+volatile uint32_t lastAudioBytesRead = 0;
+volatile uint16_t lastAudioFramesRead = 0;
+volatile int32_t lastRawL = 0;
+volatile int32_t lastRawR = 0;
+
+void clearStrip() {
+  strip.clear();
+  strip.show();
+}
+
+uint32_t ledRefreshIntervalUs() {
+  uint32_t physicalLimitUs = (uint32_t)LED_COUNT * LED_WS2812_US_PER_PIXEL + LED_SHOW_MARGIN_US;
+  uint32_t measuredLimitUs = lastShowDurationUs + LED_SHOW_MARGIN_US;
+  if (lastRenderDurationUs > LED_RENDER_BUDGET_US) {
+    measuredLimitUs += lastRenderDurationUs - LED_RENDER_BUDGET_US + LED_RENDER_IDLE_MARGIN_US;
+  }
+  if (measuredLimitUs > physicalLimitUs) {
+    physicalLimitUs = measuredLimitUs;
+  }
+  return physicalLimitUs > LED_TARGET_FRAME_US ? physicalLimitUs : LED_TARGET_FRAME_US;
+}
+
+float estimatedLedFps() {
+  return 1000000.0f / (float)ledRefreshIntervalUs();
+}
+
+void publishLatestAudioFrame() {
+  portENTER_CRITICAL(&audioFrameMux);
+  sharedAudioFrame = audioAnalyzer.latestFrame();
+  portEXIT_CRITICAL(&audioFrameMux);
+}
+
+void setActiveVisualizer(uint8_t index) {
+  if (index >= VISUALIZER_COUNT) {
+    return;
+  }
+
+  activeVisualizerIndex = index;
+  visualizers[activeVisualizerIndex]->reset();
+  clearStrip();
+
+  Serial.print("Active visualizer: ");
+  Serial.println(visualizers[activeVisualizerIndex]->name());
+}
+
+void printVisualizerList() {
+  Serial.println("Visualizers:");
+  for (uint8_t i = 0; i < VISUALIZER_COUNT; i++) {
+    Serial.print("  ");
+    Serial.print(i);
+    Serial.print(": ");
+    Serial.println(visualizers[i]->name());
+  }
+  Serial.println("Commands: list, next, spectrum, ripples, sparks, plasma, candy, afterglow, cosmic/gravity, brightness <0-255>");
+  Serial.print("LEDs: ");
+  Serial.print(LED_COUNT);
+  Serial.print(" estimated max FPS on one WS2812 data pin: ");
+  Serial.println(estimatedLedFps(), 1);
+  Serial.print("Audio analysis bands: ");
+  Serial.println(AUDIO_ANALYSIS_BANDS);
+}
+
+void handleVisualizerCommand(char* command) {
+  while (*command == ' ') {
+    command++;
+  }
+
+  char* end = command + strlen(command);
+  while (end > command && *(end - 1) == ' ') {
+    *(--end) = '\0';
+  }
+
+  if (strcmp(command, "list") == 0) {
+    printVisualizerList();
+    return;
+  }
+
+  if (strcmp(command, "next") == 0) {
+    setActiveVisualizer((activeVisualizerIndex + 1) % VISUALIZER_COUNT);
+    return;
+  }
+
+  if (strcmp(command, "spectrum") == 0 || strcmp(command, "0") == 0) {
+    setActiveVisualizer(0);
+    return;
+  }
+
+  if (strcmp(command, "ripples") == 0 || strcmp(command, "drift") == 0 || strcmp(command, "drift-ripples") == 0 || strcmp(command, "1") == 0) {
+    setActiveVisualizer(1);
+    return;
+  }
+
+  if (strcmp(command, "sparks") == 0 || strcmp(command, "particles") == 0 || strcmp(command, "spark-particles") == 0 || strcmp(command, "2") == 0) {
+    setActiveVisualizer(2);
+    return;
+  }
+
+  if (strcmp(command, "plasma") == 0 || strcmp(command, "waveform") == 0 || strcmp(command, "scope") == 0 || strcmp(command, "waveform-plasma") == 0 || strcmp(command, "3") == 0) {
+    setActiveVisualizer(3);
+    return;
+  }
+
+  if (strcmp(command, "candy") == 0 || strcmp(command, "4") == 0) {
+    setActiveVisualizer(4);
+    return;
+  }
+
+  if (strcmp(command, "afterglow") == 0 || strcmp(command, "glow") == 0 || strcmp(command, "spill") == 0 || strcmp(command, "lightleak") == 0 || strcmp(command, "5") == 0) {
+    setActiveVisualizer(5);
+    return;
+  }
+
+  if (strcmp(command, "cosmic") == 0 || strcmp(command, "gravity") == 0 || strcmp(command, "cosmic-gravity") == 0 || strcmp(command, "ember") == 0 || strcmp(command, "vortex") == 0 || strcmp(command, "ember-vortex") == 0 || strcmp(command, "6") == 0) {
+    setActiveVisualizer(6);
+    return;
+  }
+
+  if (strncmp(command, "brightness ", 11) == 0) {
+    int brightness = atoi(command + 11);
+    if (brightness < 0) brightness = 0;
+    if (brightness > 255) brightness = 255;
+    currentLedBrightness = (uint8_t)brightness;
+    strip.setBrightness(currentLedBrightness);
+    strip.show();
+    Serial.print("LED brightness: ");
+    Serial.println(brightness);
+    return;
+  }
+
+  Serial.print("Unknown command: ");
+  Serial.println(command);
+  printVisualizerList();
+}
+
+void pollSerialCommands() {
+  static char commandBuffer[48];
+  static uint8_t commandLength = 0;
+
+  while (Serial.available() > 0) {
+    char c = (char)Serial.read();
+
+    if (c == '\n' || c == '\r') {
+      if (commandLength > 0) {
+        commandBuffer[commandLength] = '\0';
+        handleVisualizerCommand(commandBuffer);
+        commandLength = 0;
+      }
+      continue;
+    }
+
+    if (commandLength < sizeof(commandBuffer) - 1) {
+      if (c >= 'A' && c <= 'Z') {
+        c = c - 'A' + 'a';
+      }
+      commandBuffer[commandLength++] = c;
+    }
+  }
+}
+
+void setupI2S() {
+  i2s_config_t cfg = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
+    .sample_rate = SAMPLE_RATE,
+
+    // PCM1861 outputs 24-bit audio, but use 32-bit slots:
+    // stereo * 32 bits = 64 BCK per LRCK, exactly what the PCM1861 likes.
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
+
+    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count = 8,
+    .dma_buf_len = 256,
+
+    // Use ESP32 audio PLL for a less-janky audio clock.
+    .use_apll = true,
+
+    .tx_desc_auto_clear = false,
+
+    // Force correct MCLK if your core supports this field.
+    .fixed_mclk = MCLK_HZ,
+
+    // These exist in newer Arduino-ESP32 / ESP-IDF 4.x builds.
+    .mclk_multiple = I2S_MCLK_MULTIPLE_256,
+    .bits_per_chan = I2S_BITS_PER_CHAN_32BIT
+  };
+
+  i2s_pin_config_t pins = {
+    .mck_io_num = PIN_I2S_MCLK,
+    .bck_io_num = PIN_I2S_BCLK,
+    .ws_io_num = PIN_I2S_LRCK,
+    .data_out_num = I2S_PIN_NO_CHANGE,
+    .data_in_num = PIN_I2S_DIN
+  };
+
+  ESP_ERROR_CHECK(i2s_driver_install(I2S_PORT, &cfg, 0, NULL));
+  ESP_ERROR_CHECK(i2s_set_pin(I2S_PORT, &pins));
+  ESP_ERROR_CHECK(i2s_zero_dma_buffer(I2S_PORT));
+}
+
+void audioTask(void* parameter) {
+  (void)parameter;
+
+  while (true) {
+    size_t bytesRead = 0;
+    esp_err_t err = i2s_read(
+      I2S_PORT,
+      audioTaskSamples,
+      sizeof(audioTaskSamples),
+      &bytesRead,
+      portMAX_DELAY
+    );
+
+    uint16_t frames = bytesRead / 8; // 2 channels * 32-bit
+    if (err != ESP_OK || frames == 0) {
+      audioReadFailures++;
+      continue;
+    }
+
+    lastAudioBytesRead = bytesRead;
+    lastAudioFramesRead = frames;
+    lastRawL = audioTaskSamples[0];
+    lastRawR = audioTaskSamples[1];
+
+    if (audioAnalyzer.processBlock(audioTaskSamples, frames)) {
+      publishLatestAudioFrame();
+      vTaskDelay(pdMS_TO_TICKS(1));
+    }
+  }
+}
+
+void startAudioTask() {
+  xTaskCreatePinnedToCore(
+    audioTask,
+    "audio-analyzer",
+    8192,
+    nullptr,
+    3,
+    &audioTaskHandle,
+    0
+  );
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  strip.begin();
+  strip.setBrightness(currentLedBrightness);
+  clearStrip();
+
+  for (uint8_t i = 0; i < VISUALIZER_COUNT; i++) {
+    visualizers[i]->begin();
+  }
+
+  clearAudioAnalysisFrame(sharedAudioFrame);
+  audioAnalyzer.begin();
+  setupI2S();
+  startAudioTask();
+
+  Serial.println("PCM1861 I2S RX started at 96 kHz.");
+  Serial.println("Audio analyzer task pinned to core 0.");
+  printVisualizerList();
+  if (DEFAULT_VISUALIZER_INDEX < VISUALIZER_COUNT) {
+    setActiveVisualizer(DEFAULT_VISUALIZER_INDEX);
+  } else {
+    setActiveVisualizer(0);
+  }
+}
+
+void loop() {
+  pollSerialCommands();
+
+  uint32_t nowUs = micros();
+  if ((uint32_t)(nowUs - lastLedRefreshUs) >= ledRefreshIntervalUs()) {
+    lastLedRefreshUs = nowUs;
+
+    AudioAnalysisFrame audioFrame;
+    portENTER_CRITICAL(&audioFrameMux);
+    audioFrame = sharedAudioFrame;
+    portEXIT_CRITICAL(&audioFrameMux);
+
+    uint32_t renderStartUs = micros();
+    visualizers[activeVisualizerIndex]->render(strip, audioFrame);
+    lastRenderDurationUs = micros() - renderStartUs;
+
+    uint32_t showStartUs = micros();
+    strip.show();
+    lastShowDurationUs = micros() - showStartUs;
+  }
+
+  static uint32_t lastPrint = 0;
+  uint32_t now = millis();
+  if (DEBUG_AUDIO_PRINTS && now - lastPrint > 500) {
+    lastPrint = now;
+
+    AudioAnalysisFrame audioFrame;
+    portENTER_CRITICAL(&audioFrameMux);
+    audioFrame = sharedAudioFrame;
+    portEXIT_CRITICAL(&audioFrameMux);
+
+    int32_t rawL = lastRawL;
+    int32_t rawR = lastRawR;
+
+    int32_t s24L = rawL >> 8;
+    int32_t s24R = rawR >> 8;
+
+    Serial.print("bytes=");
+    Serial.print(lastAudioBytesRead);
+    Serial.print(" frames=");
+    Serial.print(lastAudioFramesRead);
+    Serial.print(" rawL=0x");
+    Serial.print((uint32_t)rawL, HEX);
+    Serial.print(" rawR=0x");
+    Serial.print((uint32_t)rawR, HEX);
+    Serial.print(" s24L=");
+    Serial.print(s24L);
+    Serial.print(" s24R=");
+    Serial.print(s24R);
+    Serial.print(" seq=");
+    Serial.print(audioFrame.sequence);
+    Serial.print(" bass=");
+    Serial.print(audioFrame.bass, 2);
+    Serial.print(" low45-140=");
+    Serial.print(audioFrame.kick, 2);
+    Serial.print(" mid=");
+    Serial.print(audioFrame.mid, 2);
+    Serial.print(" treble=");
+    Serial.print(audioFrame.treble, 2);
+    Serial.print(" domHz=");
+    Serial.print(audioFrame.dominantFrequencyHz, 0);
+    Serial.print(" domDb=");
+    Serial.print(audioFrame.bandDb[audioFrame.dominantBand], 1);
+    Serial.print(" fps=");
+    Serial.print(estimatedLedFps(), 1);
+    Serial.print(" i2sFailures=");
+    Serial.println(audioReadFailures);
+  }
+}
