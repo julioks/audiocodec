@@ -67,12 +67,6 @@ arduino-cli core install esp32:esp32
 arduino-cli lib install "Adafruit NeoPixel"
 ```
 
-## Local Arduino Config
-
-The real `arduino-cli.yaml` is intentionally not tracked. Arduino CLI config
-usually contains paths such as the local Arduino data directory, download
-cache, and sketchbook location, which are different on every machine.
-
 ## Build And Upload
 
 Replace `COM3` with the serial port for your ESP32:
@@ -111,11 +105,3 @@ shown by `list`.
 - `audio/` contains the analysis frame and FFT/audio feature extraction.
 - `visualiser/` contains the shared visualizer interface and the individual
   rendering modes.
-
-## Repository Notes
-
-The repository tracks source and portable project files only. Local Arduino CLI
-configuration, helper scripts, downloaded tools, generated build output, and
-temporary publish folders are ignored.
-
-No open-source license is included, so the default copyright rules apply.
