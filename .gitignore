@@ -2,6 +2,7 @@
 .arduino/
 .tools/
 arduino-cli.yaml
+arduino-cli.cmd
 
 # Arduino / embedded build output
 build/

@@ -20,8 +20,6 @@ ESP32, and renders the result to a LED matrix as real-time music visualizers.
   - afterglow
   - ember vortex
 - Serial commands for switching visualizers and changing LED brightness.
-- Windows helper script for Arduino CLI, while still working with a normal
-  Arduino IDE setup.
 
 ## Tested Toolchain
 
@@ -61,12 +59,12 @@ WS2812 signalling.
 - ESP32 Arduino board package (`esp32:esp32`).
 - Adafruit NeoPixel library.
 
-With Arduino CLI:
+With Arduino CLI installed and available on `PATH`:
 
 ```powershell
-.\arduino-cli.cmd core update-index
-.\arduino-cli.cmd core install esp32:esp32
-.\arduino-cli.cmd lib install "Adafruit NeoPixel"
+arduino-cli core update-index
+arduino-cli core install esp32:esp32
+arduino-cli lib install "Adafruit NeoPixel"
 ```
 
 ## Local Arduino Config
@@ -75,19 +73,14 @@ The real `arduino-cli.yaml` is intentionally not tracked. Arduino CLI config
 usually contains paths such as the local Arduino data directory, download
 cache, and sketchbook location, which are different on every machine.
 
-The helper script works without a project config. If a local `arduino-cli.yaml`
-exists, it uses it; otherwise it falls back to Arduino CLI's default config.
-It first looks for `.tools\arduino-cli.exe`, then falls back to the CLI bundled
-with Arduino IDE on Windows.
-
 ## Build And Upload
 
 Replace `COM3` with the serial port for your ESP32:
 
 ```powershell
-.\arduino-cli.cmd compile --fqbn esp32:esp32:esp32 .
-.\arduino-cli.cmd upload -p COM3 --fqbn esp32:esp32:esp32 .
-.\arduino-cli.cmd monitor -p COM3 --config baudrate=115200
+arduino-cli compile --fqbn esp32:esp32:esp32 .
+arduino-cli upload -p COM3 --fqbn esp32:esp32:esp32 .
+arduino-cli monitor -p COM3 --config baudrate=115200
 ```
 
 The compile command was last verified successfully with the tested toolchain
@@ -118,13 +111,11 @@ shown by `list`.
 - `audio/` contains the analysis frame and FFT/audio feature extraction.
 - `visualiser/` contains the shared visualizer interface and the individual
   rendering modes.
-- `arduino-cli.cmd` is a Windows convenience wrapper. The sketch itself is not
-  tied to that script.
 
 ## Repository Notes
 
 The repository tracks source and portable project files only. Local Arduino CLI
-configuration, downloaded tools, generated build output, and temporary publish
-folders are ignored.
+configuration, helper scripts, downloaded tools, generated build output, and
+temporary publish folders are ignored.
 
 No open-source license is included, so the default copyright rules apply.
