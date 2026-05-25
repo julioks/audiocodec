@@ -88,10 +88,3 @@ Open the serial monitor at 115200 baud and send:
 - `cosmic` or `gravity`
 - `brightness <0-255>`
 
-## Repository Notes
-
-Local tool binaries, generated Arduino build output, machine-specific CLI
-configuration, and temporary publish folders are intentionally ignored.
-
-No license has been selected yet. Add one before accepting outside reuse or
-contributions.
