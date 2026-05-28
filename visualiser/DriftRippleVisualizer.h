@@ -11,10 +11,10 @@ static constexpr float DRIFT_RIPPLE_RISE_THRESHOLD = 0.065f;
 static constexpr uint16_t DRIFT_RIPPLE_MIN_SPAWN_MS = 76;
 static constexpr uint16_t DRIFT_RIPPLE_EXTRA_QUIET_SPAWN_MS = 90;
 
-class DriftRippleVisualizer : public AudioVisualizer {
+class DriftRippleEffect : public VisualizerLayerEffect {
 public:
   const char* name() const override {
-    return "drift-ripples";
+    return "effect-1-ripples";
   }
 
   void begin() override {
@@ -22,11 +22,7 @@ public:
   }
 
   void reset() override {
-    for (uint16_t i = 0; i < LED_COUNT; i++) {
-      canvasR[i] = 0;
-      canvasG[i] = 0;
-      canvasB[i] = 0;
-    }
+    trail.clear();
 
     for (uint8_t i = 0; i < DRIFT_RIPPLE_MAX_RIPPLES; i++) {
       ripples[i].active = false;
@@ -53,10 +49,9 @@ public:
     lastRenderMs = 0;
     lastAudioSequence = 0;
     rngState = 0x5A17C0DEUL;
-    ditherFrame = 0;
   }
 
-  void render(Adafruit_NeoPixel& pixels, const AudioAnalysisFrame& audio) override {
+  void render(VisualizerCanvas& canvas, const AudioAnalysisFrame& audio, VisualizerPaletteId palette) override {
     uint32_t now = millis();
     float frameScale = animationFrameScale(now);
 
@@ -69,18 +64,11 @@ public:
 
     for (uint8_t i = 0; i < DRIFT_RIPPLE_MAX_RIPPLES; i++) {
       if (ripples[i].active) {
-        drawRipple(ripples[i], frameScale);
+        drawRipple(ripples[i], frameScale, palette);
       }
     }
 
-    for (uint16_t i = 0; i < LED_COUNT; i++) {
-      pixels.setPixelColor(
-        i,
-        visualizerColor(pixels, i, canvasR[i], canvasG[i], canvasB[i], ditherFrame)
-      );
-    }
-
-    ditherFrame++;
+    canvas.blendAdd(trail);
     pendingBassHit *= powf(0.76f, frameScale);
   }
 
@@ -106,9 +94,7 @@ private:
   };
 
   Ripple ripples[DRIFT_RIPPLE_MAX_RIPPLES];
-  float canvasR[LED_COUNT];
-  float canvasG[LED_COUNT];
-  float canvasB[LED_COUNT];
+  VisualizerCanvas trail;
   float bassEnergy = 0.0f;
   float subBassEnergy = 0.0f;
   float kickEnergy = 0.0f;
@@ -130,7 +116,6 @@ private:
   uint32_t lastRenderMs = 0;
   uint32_t lastAudioSequence = 0;
   uint32_t rngState = 0x5A17C0DEUL;
-  uint8_t ditherFrame = 0;
 
   void applyAudio(const AudioAnalysisFrame& audio) {
     if (!audio.ready || audio.sequence == lastAudioSequence) {
@@ -201,15 +186,7 @@ private:
 
   void fadeCanvas(float frameScale) {
     float fade = powf(DRIFT_RIPPLE_TRAIL_FADE, frameScale);
-    for (uint16_t i = 0; i < LED_COUNT; i++) {
-      canvasR[i] *= fade;
-      canvasG[i] *= fade;
-      canvasB[i] *= fade;
-
-      if (canvasR[i] < 0.12f) canvasR[i] = 0.0f;
-      if (canvasG[i] < 0.12f) canvasG[i] = 0.0f;
-      if (canvasB[i] < 0.12f) canvasB[i] = 0.0f;
-    }
+    trail.fade(fade, 0.12f);
   }
 
   void maybeSpawnRipples(uint32_t now) {
@@ -310,7 +287,7 @@ private:
     return clamp01(trebleEnergy * 0.44f + motionEnergy * 0.36f + fabsf(stereoBalance) * 0.20f);
   }
 
-  void drawRipple(Ripple& ripple, float frameScale) {
+  void drawRipple(Ripple& ripple, float frameScale, VisualizerPaletteId palette) {
     ripple.radius += ripple.speed * (0.90f + loudEnergy * 0.16f) * frameScale;
     ripple.age += frameScale;
 
@@ -362,61 +339,15 @@ private:
           continue;
         }
 
-        uint8_t r = 0;
-        uint8_t g = 0;
-        uint8_t b = 0;
+        float r = 0.0f;
+        float g = 0.0f;
+        float b = 0.0f;
         float tone = wrap01(ripple.tone + ripple.toneDrift * ripple.age + trebleEnergy * 0.08f + edge * 0.045f + sinf(treblePhase + ripple.seed) * 0.030f);
-        float white = 0.0f;
-        synthwaveColor(tone, clamp01(level), clamp01(white), r, g, b);
-        addPixel(ledIndexXY(x, y), r, g, b);
+        visualizerSamplePalette(palette, tone, r, g, b);
+        float glow = 0.10f + clamp01(level) * 1.10f;
+        trail.addPixel(ledIndexXY(x, y), r * glow, g * glow, b * glow);
       }
     }
-  }
-
-  void synthwaveColor(float tone, float level, float white, uint8_t& r, uint8_t& g, uint8_t& b) {
-    tone = wrap01(tone);
-
-    float baseR = 0.0f;
-    float baseG = 0.0f;
-    float baseB = 0.0f;
-
-    if (tone < 0.17f) {
-      float t = tone / 0.17f;
-      baseR = 0.0f + 24.0f * t;
-      baseG = 210.0f + (72.0f - 210.0f) * t;
-      baseB = 255.0f;
-    } else if (tone < 0.34f) {
-      float t = (tone - 0.17f) / 0.17f;
-      baseR = 24.0f + (118.0f - 24.0f) * t;
-      baseG = 72.0f + (20.0f - 72.0f) * t;
-      baseB = 255.0f;
-    } else if (tone < 0.52f) {
-      float t = (tone - 0.34f) / 0.18f;
-      baseR = 118.0f + (255.0f - 118.0f) * t;
-      baseG = 20.0f;
-      baseB = 255.0f + (220.0f - 255.0f) * t;
-    } else if (tone < 0.70f) {
-      float t = (tone - 0.52f) / 0.18f;
-      baseR = 255.0f;
-      baseG = 20.0f + (45.0f - 20.0f) * t;
-      baseB = 220.0f + (115.0f - 220.0f) * t;
-    } else if (tone < 0.86f) {
-      float t = (tone - 0.70f) / 0.16f;
-      baseR = 255.0f;
-      baseG = 45.0f + (150.0f - 45.0f) * t;
-      baseB = 115.0f + (35.0f - 115.0f) * t;
-    } else {
-      float t = (tone - 0.86f) / 0.14f;
-      baseR = 255.0f + (0.0f - 255.0f) * t;
-      baseG = 150.0f + (210.0f - 150.0f) * t;
-      baseB = 35.0f + (255.0f - 35.0f) * t;
-    }
-
-    float glow = 0.10f + level * 1.10f;
-    float whiteBoost = white * 48.0f;
-    r = clampChannel(baseR * glow + whiteBoost);
-    g = clampChannel(baseG * glow + whiteBoost);
-    b = clampChannel(baseB * glow + whiteBoost);
   }
 
   float chooseRippleTone(float strength) {
@@ -436,26 +367,6 @@ private:
     }
 
     return wrap01(baseTone * 0.62f + dominantTone * 0.22f + spectralTilt * 0.16f + trebleEnergy * 0.10f + strength * 0.05f + stereoBalance * 0.04f);
-  }
-
-  uint8_t clampChannel(float value) const {
-    if (value < 0.0f) {
-      return 0;
-    }
-    if (value > 255.0f) {
-      return 255;
-    }
-    return (uint8_t)value;
-  }
-
-  void addPixel(uint16_t index, uint8_t r, uint8_t g, uint8_t b) {
-    canvasR[index] += (float)r * 0.92f;
-    canvasG[index] += (float)g * 0.92f;
-    canvasB[index] += (float)b * 0.92f;
-
-    if (canvasR[index] > 255.0f) canvasR[index] = 255.0f;
-    if (canvasG[index] > 255.0f) canvasG[index] = 255.0f;
-    if (canvasB[index] > 255.0f) canvasB[index] = 255.0f;
   }
 
   uint8_t chooseRippleSlot() {

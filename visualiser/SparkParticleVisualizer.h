@@ -8,10 +8,10 @@ static constexpr float SPARK_PARTICLE_TRAIL_FADE = 0.62f;
 static constexpr float SPARK_PARTICLE_HIT_THRESHOLD = 0.38f;
 static constexpr uint16_t SPARK_PARTICLE_BASS_BURST_MS = 52;
 
-class SparkParticleVisualizer : public AudioVisualizer {
+class SparkParticleEffect : public VisualizerLayerEffect {
 public:
   const char* name() const override {
-    return "spark-particles";
+    return "effect-2-sparkles";
   }
 
   void begin() override {
@@ -19,11 +19,7 @@ public:
   }
 
   void reset() override {
-    for (uint16_t i = 0; i < LED_COUNT; i++) {
-      canvasR[i] = 0;
-      canvasG[i] = 0;
-      canvasB[i] = 0;
-    }
+    trail.clear();
 
     for (uint8_t i = 0; i < SPARK_PARTICLE_MAX_PARTICLES; i++) {
       particles[i].active = false;
@@ -50,22 +46,17 @@ public:
     lastBassBurstMs = 0;
     lastAudioSequence = 0;
     rngState = 0xA73C9E2DUL;
-    ditherFrame = 0;
   }
 
-  void render(Adafruit_NeoPixel& pixels, const AudioAnalysisFrame& audio) override {
+  void render(VisualizerCanvas& canvas, const AudioAnalysisFrame& audio, VisualizerPaletteId palette) override {
     applyAudio(audio);
     fadeCanvas();
 
     uint32_t now = millis();
     spawnFromAudio(now);
-    updateParticles();
+    updateParticles(palette);
 
-    for (uint16_t i = 0; i < LED_COUNT; i++) {
-      pixels.setPixelColor(i, visualizerColor(pixels, i, canvasR[i], canvasG[i], canvasB[i], ditherFrame));
-    }
-
-    ditherFrame++;
+    canvas.blendAdd(trail);
     pendingBassBurst *= 0.62f;
     pendingTrebleSpark *= 0.70f;
   }
@@ -88,9 +79,7 @@ private:
   };
 
   Particle particles[SPARK_PARTICLE_MAX_PARTICLES];
-  float canvasR[LED_COUNT];
-  float canvasG[LED_COUNT];
-  float canvasB[LED_COUNT];
+  VisualizerCanvas trail;
   float bassEnergy = 0.0f;
   float kickEnergy = 0.0f;
   float trebleEnergy = 0.0f;
@@ -112,7 +101,6 @@ private:
   uint32_t lastBassBurstMs = 0;
   uint32_t lastAudioSequence = 0;
   uint32_t rngState = 0xA73C9E2DUL;
-  uint8_t ditherFrame = 0;
 
   void applyAudio(const AudioAnalysisFrame& audio) {
     if (!audio.ready || audio.sequence == lastAudioSequence) {
@@ -171,15 +159,7 @@ private:
   }
 
   void fadeCanvas() {
-    for (uint16_t i = 0; i < LED_COUNT; i++) {
-      canvasR[i] *= SPARK_PARTICLE_TRAIL_FADE;
-      canvasG[i] *= SPARK_PARTICLE_TRAIL_FADE;
-      canvasB[i] *= SPARK_PARTICLE_TRAIL_FADE;
-
-      if (canvasR[i] < 0.06f) canvasR[i] = 0.0f;
-      if (canvasG[i] < 0.06f) canvasG[i] = 0.0f;
-      if (canvasB[i] < 0.06f) canvasB[i] = 0.0f;
-    }
+    trail.fade(SPARK_PARTICLE_TRAIL_FADE, 0.06f);
   }
 
   void spawnFromAudio(uint32_t now) {
@@ -214,7 +194,7 @@ private:
     }
   }
 
-  void updateParticles() {
+  void updateParticles(VisualizerPaletteId palette) {
     float driftX = audioFlowX * (0.014f + motionEnergy * 0.032f) + stereoBalance * 0.010f;
     float driftY = audioFlowY * (0.014f + motionEnergy * 0.032f) + (spectralTilt - 0.5f) * 0.010f;
     float drag = 0.986f - motionEnergy * 0.014f - audioChaos * 0.010f;
@@ -252,11 +232,16 @@ private:
         continue;
       }
 
-      uint8_t r = 0;
-      uint8_t g = 0;
-      uint8_t b = 0;
+      float r = 0.0f;
+      float g = 0.0f;
+      float b = 0.0f;
       float tone = wrap01(p.tone + colorBase * 0.10f + trebleEnergy * 0.06f + life * p.turbulence * 0.05f);
-      synthwaveSparkColor(tone, clamp01(level), trebleEnergy * life * (0.12f + audioChaos * 0.12f), r, g, b);
+      visualizerSamplePalette(palette, tone, r, g, b);
+      float glow = 0.18f + clamp01(level) * 0.92f;
+      float whiteBoost = clamp01(trebleEnergy * life * (0.12f + audioChaos * 0.12f)) * 255.0f;
+      r = r * glow + whiteBoost;
+      g = g * glow + whiteBoost;
+      b = b * glow + whiteBoost;
       drawParticle(p.x, p.y, p.size, r, g, b);
     }
   }
@@ -375,15 +360,15 @@ private:
     return wrap01(colorBase + audioPush + (nextRandomFloat() - 0.5f) * spread);
   }
 
-  void drawParticle(float x, float y, float size, uint8_t r, uint8_t g, uint8_t b) {
+  void drawParticle(float x, float y, float size, float r, float g, float b) {
     int16_t centerX = (int16_t)roundf(x);
     int16_t centerY = (int16_t)roundf(y);
 
     addPixelSafe(centerX, centerY, r, g, b);
 
-    uint8_t sideR = (uint8_t)((float)r * size * 0.13f);
-    uint8_t sideG = (uint8_t)((float)g * size * 0.13f);
-    uint8_t sideB = (uint8_t)((float)b * size * 0.13f);
+    float sideR = r * size * 0.13f;
+    float sideG = g * size * 0.13f;
+    float sideB = b * size * 0.13f;
 
     if (size > 0.30f) {
       addPixelSafe(centerX - 1, centerY, sideR, sideG, sideB);
@@ -395,60 +380,12 @@ private:
     }
   }
 
-  void synthwaveSparkColor(float tone, float level, float white, uint8_t& r, uint8_t& g, uint8_t& b) {
-    tone = wrap01(tone);
-
-    float baseR = 0.0f;
-    float baseG = 0.0f;
-    float baseB = 0.0f;
-
-    if (tone < 0.18f) {
-      float t = tone / 0.18f;
-      baseR = 0.0f + 28.0f * t;
-      baseG = 220.0f + (88.0f - 220.0f) * t;
-      baseB = 255.0f;
-    } else if (tone < 0.38f) {
-      float t = (tone - 0.18f) / 0.20f;
-      baseR = 28.0f + (128.0f - 28.0f) * t;
-      baseG = 88.0f + (20.0f - 88.0f) * t;
-      baseB = 255.0f;
-    } else if (tone < 0.58f) {
-      float t = (tone - 0.38f) / 0.20f;
-      baseR = 128.0f + (255.0f - 128.0f) * t;
-      baseG = 20.0f;
-      baseB = 255.0f + (210.0f - 255.0f) * t;
-    } else if (tone < 0.78f) {
-      float t = (tone - 0.58f) / 0.20f;
-      baseR = 255.0f;
-      baseG = 20.0f + (120.0f - 20.0f) * t;
-      baseB = 210.0f + (40.0f - 210.0f) * t;
-    } else {
-      float t = (tone - 0.78f) / 0.22f;
-      baseR = 255.0f + (255.0f - 255.0f) * t;
-      baseG = 120.0f + (245.0f - 120.0f) * t;
-      baseB = 40.0f + (255.0f - 40.0f) * t;
-    }
-
-    float glow = 0.18f + level * 0.92f;
-    float whiteBoost = clamp01(white) * 255.0f;
-    r = clampChannel(baseR * glow + whiteBoost);
-    g = clampChannel(baseG * glow + whiteBoost);
-    b = clampChannel(baseB * glow + whiteBoost);
-  }
-
-  void addPixelSafe(int16_t x, int16_t y, uint8_t r, uint8_t g, uint8_t b) {
+  void addPixelSafe(int16_t x, int16_t y, float r, float g, float b) {
     if (x < 0 || x >= LED_DRIVER_GRID_WIDTH || y < 0 || y >= LED_DRIVER_GRID_HEIGHT) {
       return;
     }
 
-    uint16_t index = ledIndexXY((uint16_t)x, (uint16_t)y);
-    canvasR[index] += (float)r;
-    canvasG[index] += (float)g;
-    canvasB[index] += (float)b;
-
-    if (canvasR[index] > 255.0f) canvasR[index] = 255.0f;
-    if (canvasG[index] > 255.0f) canvasG[index] = 255.0f;
-    if (canvasB[index] > 255.0f) canvasB[index] = 255.0f;
+    trail.addPixel(ledIndexXY((uint16_t)x, (uint16_t)y), r, g, b);
   }
 
   uint8_t chooseParticleSlot() {
@@ -468,16 +405,6 @@ private:
     }
 
     return slot;
-  }
-
-  uint8_t clampChannel(float value) const {
-    if (value < 0.0f) {
-      return 0;
-    }
-    if (value > 255.0f) {
-      return 255;
-    }
-    return (uint8_t)value;
   }
 
   uint32_t nextRandomU32() {

@@ -28,7 +28,6 @@ static constexpr uint32_t LED_SHOW_MARGIN_US = 700UL;
 static constexpr uint32_t LED_RENDER_BUDGET_US = 7000UL;
 static constexpr uint32_t LED_RENDER_IDLE_MARGIN_US = 400UL;
 static constexpr bool DEBUG_AUDIO_PRINTS = false;
-static constexpr uint8_t DEFAULT_VISUALIZER_INDEX = 0;
 static constexpr uint16_t AUDIO_FRAMES_PER_BLOCK = 256;
 
 enum LED_DRIVER_LAYOUT : uint8_t {
@@ -65,34 +64,9 @@ uint16_t ledIndexXY(uint16_t x, uint16_t yFromBottom) {
 }
 
 #include "audio/AudioAnalyzer.h"
-#include "visualiser/SpectrumGridVisualizer.h"
-#include "visualiser/DriftRippleVisualizer.h"
-#include "visualiser/SparkParticleVisualizer.h"
-#include "visualiser/WaveformPlasmaVisualizer.h"
-#include "visualiser/CandyPeakSpectrumVisualizer.h"
-#include "visualiser/AfterglowVisualizer.h"
-#include "visualiser/EmberVortexVisualizer.h"
+#include "visualiser/VisualizerStack.h"
 
-SpectrumGridVisualizer spectrumVisualizer;
-DriftRippleVisualizer driftRippleVisualizer;
-SparkParticleVisualizer sparkParticleVisualizer;
-WaveformPlasmaVisualizer waveformPlasmaVisualizer;
-CandyPeakSpectrumVisualizer candyPeakSpectrumVisualizer;
-AfterglowVisualizer afterglowVisualizer;
-EmberVortexVisualizer emberVortexVisualizer;
-
-AudioVisualizer* visualizers[] = {
-  &spectrumVisualizer,
-  &driftRippleVisualizer,
-  &sparkParticleVisualizer,
-  &waveformPlasmaVisualizer,
-  &candyPeakSpectrumVisualizer,
-  &afterglowVisualizer,
-  &emberVortexVisualizer
-};
-
-static constexpr uint8_t VISUALIZER_COUNT = sizeof(visualizers) / sizeof(visualizers[0]);
-uint8_t activeVisualizerIndex = 0;
+VisualizerStack visualizerStack;
 uint32_t lastLedRefreshUs = 0;
 uint32_t lastRenderDurationUs = 0;
 uint32_t lastShowDurationUs = 0;
@@ -136,36 +110,6 @@ void publishLatestAudioFrame() {
   portEXIT_CRITICAL(&audioFrameMux);
 }
 
-void setActiveVisualizer(uint8_t index) {
-  if (index >= VISUALIZER_COUNT) {
-    return;
-  }
-
-  activeVisualizerIndex = index;
-  visualizers[activeVisualizerIndex]->reset();
-  clearStrip();
-
-  Serial.print("Active visualizer: ");
-  Serial.println(visualizers[activeVisualizerIndex]->name());
-}
-
-void printVisualizerList() {
-  Serial.println("Visualizers:");
-  for (uint8_t i = 0; i < VISUALIZER_COUNT; i++) {
-    Serial.print("  ");
-    Serial.print(i);
-    Serial.print(": ");
-    Serial.println(visualizers[i]->name());
-  }
-  Serial.println("Commands: list, next, spectrum, ripples, sparks, plasma, candy, afterglow, cosmic/gravity, brightness <0-255>");
-  Serial.print("LEDs: ");
-  Serial.print(LED_COUNT);
-  Serial.print(" estimated max FPS on one WS2812 data pin: ");
-  Serial.println(estimatedLedFps(), 1);
-  Serial.print("Audio analysis bands: ");
-  Serial.println(AUDIO_ANALYSIS_BANDS);
-}
-
 void handleVisualizerCommand(char* command) {
   while (*command == ' ') {
     command++;
@@ -174,51 +118,6 @@ void handleVisualizerCommand(char* command) {
   char* end = command + strlen(command);
   while (end > command && *(end - 1) == ' ') {
     *(--end) = '\0';
-  }
-
-  if (strcmp(command, "list") == 0) {
-    printVisualizerList();
-    return;
-  }
-
-  if (strcmp(command, "next") == 0) {
-    setActiveVisualizer((activeVisualizerIndex + 1) % VISUALIZER_COUNT);
-    return;
-  }
-
-  if (strcmp(command, "spectrum") == 0 || strcmp(command, "0") == 0) {
-    setActiveVisualizer(0);
-    return;
-  }
-
-  if (strcmp(command, "ripples") == 0 || strcmp(command, "drift") == 0 || strcmp(command, "drift-ripples") == 0 || strcmp(command, "1") == 0) {
-    setActiveVisualizer(1);
-    return;
-  }
-
-  if (strcmp(command, "sparks") == 0 || strcmp(command, "particles") == 0 || strcmp(command, "spark-particles") == 0 || strcmp(command, "2") == 0) {
-    setActiveVisualizer(2);
-    return;
-  }
-
-  if (strcmp(command, "plasma") == 0 || strcmp(command, "waveform") == 0 || strcmp(command, "scope") == 0 || strcmp(command, "waveform-plasma") == 0 || strcmp(command, "3") == 0) {
-    setActiveVisualizer(3);
-    return;
-  }
-
-  if (strcmp(command, "candy") == 0 || strcmp(command, "4") == 0) {
-    setActiveVisualizer(4);
-    return;
-  }
-
-  if (strcmp(command, "afterglow") == 0 || strcmp(command, "glow") == 0 || strcmp(command, "spill") == 0 || strcmp(command, "lightleak") == 0 || strcmp(command, "5") == 0) {
-    setActiveVisualizer(5);
-    return;
-  }
-
-  if (strcmp(command, "cosmic") == 0 || strcmp(command, "gravity") == 0 || strcmp(command, "cosmic-gravity") == 0 || strcmp(command, "ember") == 0 || strcmp(command, "vortex") == 0 || strcmp(command, "ember-vortex") == 0 || strcmp(command, "6") == 0) {
-    setActiveVisualizer(6);
-    return;
   }
 
   if (strncmp(command, "brightness ", 11) == 0) {
@@ -233,13 +132,11 @@ void handleVisualizerCommand(char* command) {
     return;
   }
 
-  Serial.print("Unknown command: ");
-  Serial.println(command);
-  printVisualizerList();
+  visualizerStack.handleCommandLine(command);
 }
 
 void pollSerialCommands() {
-  static char commandBuffer[48];
+  static char commandBuffer[96];
   static uint8_t commandLength = 0;
 
   while (Serial.available() > 0) {
@@ -356,9 +253,7 @@ void setup() {
   strip.setBrightness(currentLedBrightness);
   clearStrip();
 
-  for (uint8_t i = 0; i < VISUALIZER_COUNT; i++) {
-    visualizers[i]->begin();
-  }
+  visualizerStack.begin();
 
   clearAudioAnalysisFrame(sharedAudioFrame);
   audioAnalyzer.begin();
@@ -367,12 +262,8 @@ void setup() {
 
   Serial.println("PCM1861 I2S RX started at 96 kHz.");
   Serial.println("Audio analyzer task pinned to core 0.");
-  printVisualizerList();
-  if (DEFAULT_VISUALIZER_INDEX < VISUALIZER_COUNT) {
-    setActiveVisualizer(DEFAULT_VISUALIZER_INDEX);
-  } else {
-    setActiveVisualizer(0);
-  }
+  visualizerStack.printHelp();
+  visualizerStack.printStack();
 }
 
 void loop() {
@@ -388,7 +279,7 @@ void loop() {
     portEXIT_CRITICAL(&audioFrameMux);
 
     uint32_t renderStartUs = micros();
-    visualizers[activeVisualizerIndex]->render(strip, audioFrame);
+    visualizerStack.render(strip, audioFrame);
     lastRenderDurationUs = micros() - renderStartUs;
 
     uint32_t showStartUs = micros();

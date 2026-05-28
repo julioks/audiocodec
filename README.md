@@ -4,22 +4,29 @@ ESP32 audio-reactive LED matrix firmware for a PCM1861-style I2S audio ADC and
 a 32 x 16 WS2812/NeoPixel panel.
 
 It samples stereo audio at 96 kHz, builds a 128-band analysis frame on the
-ESP32, and renders the result to a LED matrix as real-time music visualizers.
+ESP32, and renders the result to a LED matrix as a composable real-time
+visualizer stack.
 
 ## Features
 
 - 96 kHz I2S receive path with 24-bit PCM in 32-bit stereo slots.
 - On-device audio analysis with FFT bands, peaks, transients, stereo width,
   waveform capture, spectral centroid, and dominant frequency.
-- Seven built-in visualizers:
-  - spectrum grid
-  - drift ripples
-  - spark particles
-  - waveform plasma
-  - candy peak spectrum
-  - afterglow
-  - ember vortex
-- Serial commands for switching visualizers and changing LED brightness.
+- Mode 0 boot/clear spectrum using the standard blue-green-red palette.
+- Three stackable effect parts:
+  - `e1` drift ripples
+  - `e2` sparkles
+  - `e3` afterglow-style four-point stars
+- Palette commands for the latest effect layer:
+  - `p0` standard blue-green-red
+  - `p1` warm candy
+  - `p2` aurora
+- Frequency commands for the latest effect layer, using the analyzer bins:
+  - `lf100` lower limit at 100 Hz
+  - `hf250` upper limit at 250 Hz
+- Noise floor commands for the latest effect layer:
+  - `f20` or `floor20` ignores the lowest 20% of that layer's signal
+- Serial commands for building the visualizer stack and changing LED brightness.
 
 ## Tested Toolchain
 
@@ -85,23 +92,36 @@ listed above.
 Open the serial monitor at 115200 baud and send:
 
 - `list`
-- `next`
-- `spectrum`
-- `ripples`
-- `sparks`
-- `plasma`
-- `candy`
-- `afterglow`
-- `cosmic` or `gravity`
+- `clear`
+- `e1`
+- `e2`
+- `e3`
+- `p0`
+- `p1`
+- `p2`
+- `lf100`
+- `hf250`
+- `f20`
+- `floor20`
 - `brightness <0-255>`
 
-The number aliases `0` through `6` also select the visualizers in the order
-shown by `list`.
+Commands can be comma-separated. For example, `e3,e1,p1,p2,e2,p1` builds a
+stack with afterglow stars on the default palette, ripples recolored to `p2`,
+and sparkles on `p1` as the top layer. The stack keeps appending until `clear`
+is sent, which returns to mode 0 spectrum on `p0`.
+
+Frequency commands apply to the latest effect until another `eN` is added, so
+`e1,lf100,hf250,e2` limits only the ripples to 100-250 Hz. If `lf`/`hf` are
+sent before any effect, they are held for the next effect: `lf100,hf250,e1`.
+
+Noise floor commands work the same way. `e2,f20` makes sparkles ignore the
+bottom 20% of their selected bins and remaps the remaining signal back to the
+normal range. `f0` clears the floor for that layer.
 
 ## Project Layout
 
 - `audiocodec.ino` contains the ESP32 setup, I2S input loop, LED driver setup,
-  serial command handling, and visualizer selection.
+  and serial command forwarding.
 - `audio/` contains the analysis frame and FFT/audio feature extraction.
-- `visualiser/` contains the shared visualizer interface and the individual
-  rendering modes.
+- `visualiser/` contains the shared visualizer canvas/palette code, stack
+  handler, mode 0 spectrum, and the three composable effect parts.

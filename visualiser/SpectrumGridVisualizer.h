@@ -8,27 +8,21 @@ static constexpr float LED_SPECTRUM_DB_FLOOR = -78.0f;
 static constexpr float LED_SPECTRUM_DB_CEILING = -3.0f;
 static constexpr float LED_SPECTRUM_SILENCE_DB = -96.0f;
 
-class SpectrumGridVisualizer : public AudioVisualizer {
+class SpectrumGridEffect : public VisualizerLayerEffect {
 public:
   const char* name() const override {
-    return "spectrum";
-  }
-
-  void begin() override {
-    reset();
+    return "mode-0-spectrum";
   }
 
   void reset() override {
-    ditherFrame = 0;
     for (uint16_t column = 0; column < LED_DRIVER_GRID_WIDTH; column++) {
       columnDb[column] = LED_SPECTRUM_SILENCE_DB;
       columnLevel[column] = 0.0f;
     }
   }
 
-  void render(Adafruit_NeoPixel& pixels, const AudioAnalysisFrame& audio) override {
+  void render(VisualizerCanvas& canvas, const AudioAnalysisFrame& audio, VisualizerPaletteId palette) override {
     if (!audio.ready) {
-      pixels.clear();
       return;
     }
 
@@ -44,23 +38,22 @@ public:
         barHeight = LED_DRIVER_GRID_HEIGHT;
       }
 
-      for (uint16_t y = 0; y < LED_DRIVER_GRID_HEIGHT; y++) {
-        uint16_t pixelIndex = ledIndexXY(x, y);
-        if (y < barHeight) {
-          pixels.setPixelColor(pixelIndex, spectrumColor(pixels, pixelIndex, level));
-        } else {
-          pixels.setPixelColor(pixelIndex, 0);
-        }
+      float r = 0.0f;
+      float g = 0.0f;
+      float b = 0.0f;
+      visualizerSamplePalette(palette, level, r, g, b);
+
+      for (uint16_t y = 0; y < barHeight; y++) {
+        float yAmount = (float)(y + 1) / (float)LED_DRIVER_GRID_HEIGHT;
+        float glow = 0.42f + yAmount * 0.58f;
+        canvas.setPixel(ledIndexXY(x, y), r * glow, g * glow, b * glow);
       }
     }
-
-    ditherFrame++;
   }
 
 private:
   float columnDb[LED_DRIVER_GRID_WIDTH];
   float columnLevel[LED_DRIVER_GRID_WIDTH];
-  uint8_t ditherFrame = 0;
 
   void updateColumns(const AudioAnalysisFrame& audio) {
     float minHz = audio.bandCenterHz[0];
@@ -120,25 +113,5 @@ private:
 
   float dbToLevel(float db) const {
     return clamp01((db - LED_SPECTRUM_DB_FLOOR) / (LED_SPECTRUM_DB_CEILING - LED_SPECTRUM_DB_FLOOR));
-  }
-
-  uint32_t spectrumColor(Adafruit_NeoPixel& pixels, uint16_t pixelIndex, float level) {
-    float heat = clamp01(level);
-
-    uint8_t r = 0;
-    uint8_t g = 0;
-    uint8_t b = 0;
-
-    if (heat < 0.50f) {
-      float t = heat * 2.0f;
-      g = (uint8_t)(255.0f * t);
-      b = (uint8_t)(255.0f * (1.0f - t));
-    } else {
-      float t = (heat - 0.50f) * 2.0f;
-      r = (uint8_t)(255.0f * t);
-      g = (uint8_t)(255.0f * (1.0f - t));
-    }
-
-    return visualizerColor(pixels, pixelIndex, r, g, b, ditherFrame);
   }
 };
